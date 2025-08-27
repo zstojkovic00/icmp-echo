@@ -38,17 +38,25 @@ func findIpByMac() {
 			fmt.Printf("\n%+v\n", startIp)
 			fmt.Printf("%+v\n", endIp)
 
-			// refreshARPTable(startIp, endIp)
+			refreshARPTable(startIp, endIp)
 		}
 	}
 }
 
-func refreshARPTable(starIp []int, endIp []int) {
-	socket, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_ICMP)
+func refreshARPTable(startIp []int, endIp []int) {
+	socket, err := syscall.Socket(
+		syscall.AF_INET,
+		syscall.SOCK_RAW,
+		syscall.IPPROTO_ICMP,
+	)
+
+	defer syscall.Close(socket)
 
 	if err != nil {
 		panic(err)
 	}
+
+	fmt.Printf("Socket creation succeeded.\n")
 
 	icmp := ICMP{
 		Type:           8,
@@ -63,6 +71,32 @@ func refreshARPTable(starIp []int, endIp []int) {
 	packet[2] = byte(checksum >> 8)
 	packet[3] = byte(checksum)
 
+	for i := startIp[3]; i < endIp[3]; i++ {
+
+		addr := &syscall.SockaddrInet4{
+			Port: 0,
+			Addr: [4]byte{byte(startIp[0]), byte(startIp[1]), byte(startIp[2]), byte(i)},
+		}
+
+		fmt.Printf("\nPinging %d.%d.%d.%d\n", startIp[0], startIp[1], startIp[2], i)
+		err = syscall.Sendto(socket, packet, 0, addr)
+		fmt.Printf("ICMP packet sent successfully.\n")
+
+		if err != nil {
+			fmt.Printf("Error while sending ping packet: %v", err)
+			return
+		}
+
+		//	buffer := make([]byte, 1500)
+
+		//n, _, err := syscall.Recvfrom(socket, buffer, 0)
+		//
+		//if err != nil {
+		//	fmt.Printf("Error while receiving ping packet: %v\n", err)
+		//} else {
+		//	fmt.Printf("\nICMP packet received: %d bytes\n", n)
+		//}
+	}
 }
 
 /*
