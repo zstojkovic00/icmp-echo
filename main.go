@@ -7,198 +7,160 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"icmp-echo/icmp"
 )
 
 func main() {
-	findIpByMac()
+	startIP, endIP := scanLocalNetwork()
+	pingIPRange(startIP, endIP)
 }
 
-func findIpByMac() {
+func scanLocalNetwork() ([]int, []int) {
 	wirelessInterface := findWirelessInterface()
-	fmt.Printf("Wireless interface name: " + wirelessInterface.Name)
+	fmt.Printf("Wireless interface name: %s\n", wirelessInterface.Name)
 
 	addrs, err := wirelessInterface.Addrs()
-
 	if err != nil {
 		panic(err)
 	}
 
-	// 192.168.1.13/24 pronasli smo ip adresu naseg mreznog interfejsa
-	fmt.Printf("\n%+v\n", addrs)
+	// Found IP address of our network interface (e.g., 192.168.1.13/24)
+	fmt.Printf("Interface addresses: %+v\n", addrs)
 
 	for _, addr := range addrs {
 		ipNet := addr.(*net.IPNet)
 		ipV4 := ipNet.IP.To4()
 		if ipV4 != nil {
 			ones, _ := ipNet.Mask.Size()
-			fmt.Printf("IP address: %s, ones: %d bits:%d", ipNet.IP.To4(), ones, 32)
+			fmt.Printf("IP address: %s, subnet bits: %d, total bits: %d\n", ipV4, ones, 32)
 
-			// prvo moramo da izracunamo sa submask sta treba da pingujemo
-			startIp, endIp := findNetworkRange(ipV4.String(), ones)
-			fmt.Printf("\n%+v\n", startIp)
-			fmt.Printf("%+v\n", endIp)
+			// Calculate subnet range to determine what to ping
+			startIP, endIP := calculateIPRange(ipV4.String(), ones)
+			fmt.Printf("Network range start: %+v\n", startIP)
+			fmt.Printf("Network range end: %+v\n", endIP)
 
-			refreshARPTable(startIp, endIp)
+			return startIP, endIP
 		}
 	}
+
+	panic("No IPv4 address found on wireless interface")
 }
 
-func refreshARPTable(startIp []int, endIp []int) {
+func pingIPRange(startIP []int, endIP []int) {
 	socket, err := syscall.Socket(
 		syscall.AF_INET,
 		syscall.SOCK_RAW,
 		syscall.IPPROTO_ICMP,
 	)
-
 	defer syscall.Close(socket)
 
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("Socket creation succeeded.\n")
+	fmt.Printf("Socket creation succeeded\n")
 
-	icmp := ICMP{
-		Type:           8,
-		Code:           0,
-		Checksum:       0,
-		Identifier:     0,
-		SequenceNumber: 0,
-	}
+	// Create ICMP Echo Request packet
+	icmpMsg := icmp.NewEchoRequest(0, nil)
+	packet := icmpMsg.Serialize()
 
-	packet := icmp.ToBytes()
-	checksum := calculateChecksum(packet)
-	packet[2] = byte(checksum >> 8)
-	packet[3] = byte(checksum)
-
-	for i := startIp[3]; i < endIp[3]; i++ {
-
+	for i := startIP[3]; i <= endIP[3]; i++ {
 		addr := &syscall.SockaddrInet4{
 			Port: 0,
-			Addr: [4]byte{byte(startIp[0]), byte(startIp[1]), byte(startIp[2]), byte(i)},
+			Addr: [4]byte{
+				byte(startIP[0]),
+				byte(startIP[1]),
+				byte(startIP[2]),
+				byte(i),
+			},
 		}
 
-		fmt.Printf("\nPinging %d.%d.%d.%d\n", startIp[0], startIp[1], startIp[2], i)
-		err = syscall.Sendto(socket, packet, 0, addr)
-		fmt.Printf("ICMP packet sent successfully.\n")
+		fmt.Printf("Pinging %d.%d.%d.%d\n", startIP[0], startIP[1], startIP[2], i)
 
+		err = syscall.Sendto(socket, packet, 0, addr)
 		if err != nil {
-			fmt.Printf("Error while sending ping packet: %v", err)
+			fmt.Printf("Error while sending ping packet: %v\n", err)
 			return
 		}
+		fmt.Printf("ICMP packet sent successfully\n")
 
-		//	buffer := make([]byte, 1500)
-
-		//n, _, err := syscall.Recvfrom(socket, buffer, 0)
-		//
-		//if err != nil {
-		//	fmt.Printf("Error while receiving ping packet: %v\n", err)
-		//} else {
-		//	fmt.Printf("\nICMP packet received: %d bytes\n", n)
-		//}
+		// buffer := make([]byte, 1500)
+		// n, _, err := syscall.Recvfrom(socket, buffer, 0)
+		// if err != nil {
+		//     fmt.Printf("Error while receiving ping packet: %v\n", err)
+		// } else {
+		//     fmt.Printf("ICMP packet received: %d bytes\n", n)
+		// }
 	}
+
+	fmt.Printf("Network scan completed")
 }
 
 /*
-	Packet: [8, 0, 0, 0, 0, 0, 0, 0]
+	192.168.1.13/24 => means first 24 BITS are reserved for network
+	(3 bytes + 0 bits from 4th byte), last byte ranges from 0 to 255
+	192.168.1.0 -> 192.168.1.255
 
-	i=0: pair = 8*256 + 0 = 2048,    checksum = 2048
-	i=2: pair = 0*256 + 0 = 0,       checksum = 2048
-	i=4: pair = 0*256 + 0 = 0,       checksum = 2048
-	i=6: pair = 0*256 + 0 = 0,       checksum = 2048
+	192.168.1.13/25 => means first 25 BITS are reserved for network
+	(3 bytes + 1 bit from 4th byte), last 7 bits range from 0 to 127
+	192.168.1.0 -> 192.168.1.127
 */
 
-func calculateChecksum(packet []byte) uint16 {
-	var checksum uint32
-
-	for i := 0; i < len(packet); i += 2 {
-		pair := uint32(packet[i])*256 + uint32(packet[i+1])
-		checksum += pair
-	}
-
-	return uint16(^checksum)
-}
-
-func findNetworkRange(ipV4 string, ones int) ([]int, []int) {
-	// 192.168.1.13/24 => ovo znaci da su prva 24 BITA rezervisana
-	// (3 bajta + 0 bita iz 4. bajta), zadnji bajt ide od 0 do 255
-	// 192.168.1.0 -> 192.168.1.255
-
-	// 192.168.1.13/25 => ovo znaci da su prva 25 BITA rezervisana
-	// (3 bajta + 1 bit iz 4. bajta), zadnjih 7 bita ide od 0 do 127
-	// 192.168.1.0 -> 192.168.1.127
+func calculateIPRange(ipV4 string, ones int) ([]int, []int) {
 
 	if ones < 24 {
-		panic("Too many address combination to ping")
+		panic("Subnet too large, networks smaller than /24 would require pinging too many hosts")
+	}
+
+	if ones > 32 {
+		panic("Invalid subnet prefix, cannot exceed 32 bits for IPv4")
 	}
 
 	reservedBytes := ones / 8
 	reservedBits := ones % 8
 	ipParts := strings.Split(ipV4, ".")
 
-	startIp := make([]int, 4)
-	endIp := make([]int, 4)
+	startIP := make([]int, 4)
+	endIP := make([]int, 4)
 
 	for i := 0; i < 4; i++ {
-		startIp[i], _ = strconv.Atoi(ipParts[i])
-		endIp[i], _ = strconv.Atoi(ipParts[i])
+		startIP[i], _ = strconv.Atoi(ipParts[i])
+		endIP[i], _ = strconv.Atoi(ipParts[i])
 	}
 
-	// jedna ip adresa
+	// Single IP address case
 	if reservedBytes == 4 {
-		return startIp, endIp
+		return startIP, endIP
 	}
 
-	startIp[3] = 0
+	startIP[3] = 1 // Start from .1 (skip network address .0)
 
 	if reservedBits == 0 {
-		endIp[3] = 255
+		endIP[3] = 254 // End at .254 (skip broadcast address .255)
 	} else {
-		// (2^8-1)-1 = 127
-		availableHosts := int(math.Pow(2, float64(8-reservedBits))) - 1
-		endIp[3] = availableHosts
+		// Calculate available host addresses: (2^host_bits) - 2
+		availableHosts := int(math.Pow(2, float64(8-reservedBits))) - 2
+		endIP[3] = availableHosts
 	}
 
-	return startIp, endIp
+	return startIP, endIP
 }
 
 func findWirelessInterface() net.Interface {
 	interfaces, err := net.Interfaces()
-
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("%+v\n", interfaces)
+	fmt.Printf("Available interfaces: %+v\n", interfaces)
 
 	for _, iface := range interfaces {
-		if strings.HasPrefix(iface.Name, "wl") && iface.Flags&net.FlagUp != 0 {
+		if strings.HasPrefix(iface.Name, "wl") &&
+			iface.Flags&net.FlagUp != 0 {
 			return iface
 		}
 	}
 
-	panic("no interface found")
-}
-
-type ICMP struct {
-	Type           uint8
-	Code           uint8
-	Checksum       uint16
-	Identifier     uint16
-	SequenceNumber uint16
-}
-
-func (icmp *ICMP) ToBytes() []byte {
-	packet := make([]byte, 8)
-
-	packet[0] = icmp.Type
-	packet[1] = 0
-	packet[2] = 0
-	packet[3] = 0
-	packet[4] = 0
-	packet[5] = 0
-	packet[6] = 0
-	packet[7] = 0
-
-	return packet
+	panic("No wireless interface found")
 }

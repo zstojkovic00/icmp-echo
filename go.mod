@@ -1,3 +1,3 @@
-module sync-software
+module icmp-echo
 
 go 1.24
